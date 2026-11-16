@@ -68,6 +68,10 @@ These come from real runs and contradict reasonable assumptions:
   so and skip it rather than submit.
 - **The library count ignores empty libraries.** `accessibleLibraryCount` doesn't move when you
   allow something empty or still processing.
+- **Claiming needs a Write-access key.** Policies and public submits work with a normal key,
+  but the management API (`/v2/teamspaces/…`: claim, owned-library settings, Docs7 sites)
+  answers 403 `write_access_required` unless the key was created with **Write access**
+  ticked. Otherwise send the user to the dashboard for those steps.
 - **A fresh submit looks missing.** Right after `add`, the id answers `no_snippets_found`
   (`processing_or_empty`) until parsing finishes. Use `wait`, not a single probe.
 
