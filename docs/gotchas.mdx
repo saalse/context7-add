@@ -1,0 +1,29 @@
+---
+title: Gotchas
+description: Context7 behaviours that contradict reasonable assumptions, found in live runs.
+---
+
+- **Search hides refused libraries.** `libs/search` and the MCP `resolve-library-id` only show
+  what the policy allows, so "no result" doesn't mean "not indexed". Probing a library id
+  tells refused (403 `access_denied`) from missing (404).
+- **Searching by name ranks loosely.** "RFC 5545" returns unrelated libraries. Look up the
+  official source first; an RFC is `https://www.rfc-editor.org/rfc/rfcNNNN.html`, which
+  lives in `/websites/rfc-editor_rfc`.
+- **Website ids drop parts of the URL.** `docs.` / `www.`, `.com` / `.org` / `.net` and a
+  `docs` path segment are removed: `nianticspatial.com/docs/scaniverse` →
+  `/websites/nianticspatial_scaniverse`.
+- **A domain entry is about docs sites, not repo hosts.** A `github.com` entry does not admit
+  GitHub repos.
+- **"Already exists" is a 400, not a 409.** Submitting a site Context7 already has returns
+  `library-already-exists` with the id in the message, and creates nothing.
+- **Exists is not the same as covered.** A library can be months old and missing pages, or
+  empty while a more specific sibling has the content. Refresh stale ones.
+- **Crawls only follow the site's menu.** Unlinked pages stay out even after a refresh; the
+  site's llms.txt lists every page.
+- **Only exact llms.txt names are accepted:** `llms.txt`, `llms-full.txt`, `llms-small.txt`.
+- **Tiny libraries are rejected and stay public.** A section of one or two short pages ends
+  `unprocessable`, and the failed library remains in the index.
+- **The library count ignores empty libraries.** A policy dry run doesn't move for libraries
+  that are empty or still processing.
+- **Claiming needs a Write-access key.** The management API (`/v2/teamspaces/…`) answers
+  `write_access_required` to a normal key; use the dashboard instead.

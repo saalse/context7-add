@@ -1,0 +1,49 @@
+---
+title: Usage
+description: What to ask your agent, and the workflow it follows.
+---
+
+## Ask your agent
+
+- "Add https://github.com/acme/widgets to Context7 and allow it."
+- "Context7 says /acme/widgets isn't in my allowed libraries, fix it."
+- "Make the docs at https://docs.acme.dev available in context7."
+- "Is open3d indexed and allowed in my Context7?"
+
+Naming specific sources counts as approval to submit exactly those and allow their exact
+library ids. The agent asks before anything wider.
+
+## The workflow
+
+<Steps>
+  <Step title="Orient">
+    `whoami` shows your role and which list admits libraries: the allowlist
+    (`select.allowedLibraries`), the wild-card list (`quality.exceptedLibraries`), or none.
+  </Step>
+  <Step title="Check every input">
+    `check` reports whether each input is indexed, fresh, empty, or refused by the policy, and
+    which entry already covers it. It probes library ids directly, because search hides
+    libraries the policy refuses.
+  </Step>
+  <Step title="Decide">
+    Allow what exists, submit what's missing, refresh what's stale, and skip what Context7
+    can't index (with the reason).
+  </Step>
+  <Step title="Preview, then apply">
+    Dry runs show the change and the library count before and after; `--apply` saves it.
+  </Step>
+  <Step title="Wait and verify">
+    `wait` follows indexing; the agent then asks the Context7 MCP a real question to confirm
+    the library is served.
+  </Step>
+</Steps>
+
+## Allow the narrowest entry
+
+| Entry | Admits |
+|---|---|
+| `/owner/repo` | one library |
+| `/owner` | every repo that owner publishes, now or later |
+| `docs.example.com` | every library whose docs site is on that host |
+
+Exact ids are the default; wider entries need a reason and your confirmation.

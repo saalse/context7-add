@@ -1,0 +1,44 @@
+---
+title: Commands
+description: The scripts/c7.py helper, its commands, flags and exit codes.
+---
+
+Every call goes through `scripts/c7.py` (run from the skill folder). Results are JSON on
+stdout; progress and errors go to stderr. Anything that changes state is a dry run unless you
+pass `--apply`.
+
+```bash
+python3 scripts/c7.py whoami
+python3 scripts/c7.py check <url|/org/repo|name>...
+python3 scripts/c7.py allow <entry>... [--remove] [--apply]
+python3 scripts/c7.py add <url> [--type T] [--base-url URL] [--private] [--git-token-env VAR] [--apply]
+python3 scripts/c7.py upload <file.pdf|.docx|openapi.yaml> [--title T] [--apply]
+python3 scripts/c7.py refresh <libraryId> [--apply]
+python3 scripts/c7.py wait <libraryId> [--changed] [--timeout SEC]
+python3 scripts/c7.py log
+```
+
+| Command | What it does |
+|---|---|
+| `whoami` | plan, role, policy mode, which list admits libraries |
+| `check` | state, freshness and coverage per input; guessed website ids; the site's llms.txt files; a GitHub owner's repos |
+| `allow` | add or remove allowlist / wild-card entries, with a dry-run library count |
+| `add` | submit a repo, website, llms.txt or OpenAPI URL; reports the existing id if Context7 already has it |
+| `upload` | upload a PDF, DOCX or OpenAPI file (private to the teamspace) |
+| `refresh` | re-crawl or re-parse a stale library (daily limit) |
+| `wait` | poll until indexed; `--changed` waits until a refresh lands |
+| `log` | the audit trail of applied changes |
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | success (`check`: report produced; `wait`: ready) |
+| 1 | API or network error |
+| 2 | bad input |
+| 3 | missing or invalid key, or role/plan too low |
+| 4 | library not found |
+| 5 | refused by the teamspace policy |
+| 6 | rate limited |
+| 7 | unprocessable (no or too few docs) |
+| 8 | `wait` timed out |

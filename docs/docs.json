@@ -1,0 +1,26 @@
+{
+  "$schema": "https://context7.com/schema/docs7.json",
+  "name": "context7-add",
+  "description": "Agent skill that indexes missing docs in Context7 and allows them in your teamspace policy.",
+  "colors": {
+    "primary": "#2563EB"
+  },
+  "navbar": {
+    "links": [
+      { "label": "Alex Samson", "href": "https://saalse.com" }
+    ],
+    "primary": { "type": "github", "href": "https://github.com/saalse/context7-add" }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/saalse/context7-add",
+      "website": "https://saalse.com"
+    }
+  },
+  "navigation": {
+    "groups": [
+      { "group": "Get started", "pages": ["index", "install"] },
+      { "group": "Guide", "pages": ["usage", "commands", "gotchas"] }
+    ]
+  }
+}

@@ -1,0 +1,42 @@
+---
+title: Introduction
+description: Index missing docs in Context7 and allow them in your teamspace policy, from your agent.
+---
+
+`context7-add` is an [Agent Skill](https://agentskills.io/specification) for teams whose
+[Context7](https://context7.com) API key is limited by a **policy**: a hand-picked allowlist,
+or quality filters with a wild-card list.
+
+When a Context7 lookup fails with `access_denied` / "not included in your allowed libraries",
+or the library isn't indexed at all, the skill does two things:
+
+1. **Index** the source if Context7 doesn't have it: a GitHub, GitLab, Bitbucket or other Git
+   repo, a docs website, an `llms.txt` file, an OpenAPI spec, or a PDF/DOCX upload.
+2. **Allow** it in your teamspace policy, using the narrowest entry that works.
+
+Then it waits for indexing and checks that the Context7 MCP actually serves the library.
+
+<CardGroup cols={2}>
+  <Card title="Install" icon="download" href="/install">
+    Add the skill to Claude Code or any skills-compatible agent.
+  </Card>
+  <Card title="Usage" icon="play" href="/usage">
+    What to ask, and what the agent does step by step.
+  </Card>
+  <Card title="Commands" icon="terminal" href="/commands">
+    The helper script, its flags and exit codes.
+  </Card>
+  <Card title="Gotchas" icon="triangle-exclamation" href="/gotchas">
+    Context7 behaviours that surprise agents, found in live runs.
+  </Card>
+</CardGroup>
+
+## Safe by default
+
+- Nothing changes without `--apply`. Dry runs show the policy impact (how many libraries the
+  teamspace can reach before and after) before anything is saved.
+- Exact `/owner/repo` entries by default. The agent asks before org-wide or domain entries,
+  removals, private content, or anything you didn't name.
+- Every applied change is logged to `registry.jsonl`, an audit trail of why each entry exists.
+
+Made by [Alex Samson](https://saalse.com). MIT license.

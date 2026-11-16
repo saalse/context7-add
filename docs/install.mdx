@@ -1,0 +1,37 @@
+---
+title: Install
+description: Add context7-add to Claude Code or another skills-compatible agent.
+---
+
+## Install the skill
+
+<Tabs>
+  <Tab title="skills CLI">
+    ```bash
+    npx skills add saalse/context7-add
+    ```
+  </Tab>
+  <Tab title="ctx7 CLI">
+    ```bash
+    npx ctx7 skills install /saalse/context7-add context7-add
+    ```
+  </Tab>
+  <Tab title="Manual">
+    Copy `skills/context7-add/` from the [repository](https://github.com/saalse/context7-add)
+    into `~/.claude/skills/` (Claude Code), `~/.agents/skills/`, or your agent's skills folder.
+  </Tab>
+</Tabs>
+
+## Requirements
+
+- Python 3.8 or later (standard library only, nothing to install).
+- Network access to `context7.com` and `api.github.com`.
+- A Context7 API key, read from `CONTEXT7_API_KEY`, or from the `context7` MCP server entry in
+  `~/.claude.json` (`CONTEXT7_API_KEY` or `Authorization: Bearer` header). The key is never
+  printed.
+
+<Note>
+Changing policies or adding private sources needs an **owner or admin** key. Claiming a
+library and managing Docs7 sites through the API need a key created with **Write access**.
+Private sources need a paid plan.
+</Note>
