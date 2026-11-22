@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write  # needed to create the release
+
+jobs:
+  release:
+    name: Publish release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Tests (offline, API stubbed)
+        run: python -m unittest discover -s tests -v
+      - name: Check versions and extract release notes
+        run: python .github/scripts/release_check.py --tag "$GITHUB_REF_NAME" --notes-out notes.md
+      - name: Package the skill folder
+        run: |
+          cd skills
+          zip -r "../context7-add-${GITHUB_REF_NAME}.zip" context7-add \
+            -x 'context7-add/registry.jsonl' '*/__pycache__/*'
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "context7-add-${GITHUB_REF_NAME}.zip#context7-add skill folder (unzip into your agent's skills directory)" \
+            --title "context7-add ${GITHUB_REF_NAME}" \
+            --notes-file notes.md \
+            --verify-tag

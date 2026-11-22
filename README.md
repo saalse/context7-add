@@ -1,6 +1,7 @@
 # context7-add
 
 [![CI](https://github.com/saalse/context7-add/actions/workflows/ci.yml/badge.svg)](https://github.com/saalse/context7-add/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/saalse/context7-add)](https://github.com/saalse/context7-add/releases/latest)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)](skills/context7-add/scripts/c7.py)
 [![License: MIT](https://img.shields.io/github/license/saalse/context7-add)](LICENSE)
 [![Last commit](https://img.shields.io/github/last-commit/saalse/context7-add)](https://github.com/saalse/context7-add/commits/main)
@@ -46,7 +47,8 @@ npx ctx7 skills install /saalse/context7-add context7-add
 ```
 
 or copy `skills/context7-add/` into `~/.claude/skills/` (Claude Code), `~/.agents/skills/`,
-or your agent's skills folder.
+or your agent's skills folder. Each [release](https://github.com/saalse/context7-add/releases)
+has the skill folder as a zip, for a fixed version.
 
 ## Requirements
 
@@ -93,6 +95,21 @@ python3 -m unittest discover -s tests -v
 
 CI runs them on Python 3.8 to 3.14, validates the skill against the Agent Skills
 specification, and prints a coverage report.
+
+To release a new version:
+
+1. Set the same version in `.claude-plugin/plugin.json` and in `metadata.version` in
+   `skills/context7-add/SKILL.md`, and add a `## [X.Y.Z]` section to
+   [CHANGELOG.md](CHANGELOG.md). CI checks that the three agree.
+2. After the change is merged into `main`, tag it and push the tag:
+
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+
+The release workflow reruns the tests, checks that the tag matches the version, and publishes
+a GitHub release with that version's changelog section and the zipped skill folder.
 
 ## Notes
 
