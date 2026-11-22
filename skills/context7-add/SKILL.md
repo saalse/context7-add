@@ -7,7 +7,7 @@ metadata:
   author: Alex Samson
   homepage: https://saalse.com
   repository: https://github.com/saalse/context7-add
-  version: "1.2"
+  version: "1.2.0"
 ---
 
 # Context7: add and allow
