@@ -20,7 +20,7 @@
   "navigation": {
     "groups": [
       { "group": "Get started", "pages": ["index", "install"] },
-      { "group": "Guide", "pages": ["usage", "commands", "gotchas"] }
+      { "group": "Guide", "pages": ["usage", "commands", "upload", "gotchas"] }
     ]
   }
 }

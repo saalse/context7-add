@@ -3,5 +3,9 @@
   "url": "https://context7.com/saalse/context7-add",
   "public_key": "pk_6NlYtGWUARfV17Y6zVg0H",
   "projectTitle": "context7-add",
-  "description": "Agent skill that indexes repos, docs sites, llms.txt, OpenAPI specs and files in Context7 and allows them in your teamspace policy so the Context7 MCP serves them."
+  "description": "Agent skill that indexes repos, docs sites, llms.txt, OpenAPI specs and files in Context7 and allows them in your teamspace policy so the Context7 MCP serves them.",
+  "excludeFolders": [
+    "tests",
+    ".github"
+  ]
 }
