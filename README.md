@@ -54,8 +54,8 @@ or your agent's skills folder.
 
 Ask your agent, for example:
 
-- "Add https://github.com/acme/widgets to Context7 and allow it."
-- "Context7 says /acme/widgets isn't in my allowed libraries, fix it."
+- "Add https://github.com/saalse/context7-add to Context7 and allow it."
+- "Context7 says /saalse/context7-add isn't in my allowed libraries, fix it."
 - "Make the docs at https://docs.acme.dev available in context7."
 
 Or run the helper yourself:
@@ -63,16 +63,16 @@ Or run the helper yourself:
 ```bash
 C7=skills/context7-add/scripts/c7.py
 python3 $C7 whoami
-python3 $C7 check https://github.com/acme/widgets
-python3 $C7 allow /acme/widgets            # dry run
-python3 $C7 allow /acme/widgets --apply
-python3 $C7 add https://github.com/acme/widgets --apply
-python3 $C7 wait /acme/widgets
+python3 $C7 check https://github.com/saalse/context7-add
+python3 $C7 allow /saalse/context7-add            # dry run
+python3 $C7 allow /saalse/context7-add --apply
+python3 $C7 add https://github.com/saalse/context7-add --apply   # already indexed: reports its id, creates nothing
+python3 $C7 wait /saalse/context7-add
 ```
 
 Results are JSON on stdout; errors go to stderr with a distinct exit code (bad input,
-auth, not found, refused by policy, rate limited, unprocessable, timed out). See
-`python3 $C7 --help`.
+auth, not found, refused by policy, rate limited, unprocessable, timed out, submission
+queue full, file too large). See `python3 $C7 --help`.
 
 The skill follows the [Agent Skills specification](https://agentskills.io/specification).
 

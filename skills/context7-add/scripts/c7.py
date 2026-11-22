@@ -8,11 +8,15 @@ Every command that changes something is a dry run unless --apply is passed.
   c7.py check <url|/org/repo|name>...  is it in Context7? is it allowed by the policy?
   c7.py allow <entry>... [--remove] [--apply]
                                        add/remove allowlist entries (/org, /org/repo, domain.com)
-  c7.py add <url> [--type T] [--private] [--generate-docs] [--base-url URL]
-              [--git-token-env VAR] [--apply]
-                                       submit a repo / website / llms.txt / OpenAPI URL
-  c7.py upload <file> [--title T] [--description D] [--apply]
-                                       upload a PDF, DOCX or OpenAPI file
+  c7.py add <url>... [--type T] [--private] [--generate-docs] [--base-url URL]
+              [--git-token-env VAR] [--queue [--queue-timeout SEC]] [--apply]
+                                       submit repos / websites / llms.txt / OpenAPI URLs;
+                                       --queue: wait for a free slot when Context7's
+                                       5-submission queue is full, instead of stopping.
+                                       One progress line per URL on stderr; --type and
+                                       --base-url need a single URL
+  c7.py upload <file> [--title T] [--description D] [--skip-size-check] [--apply]
+                                       upload a PDF, DOCX or OpenAPI file (max ~4.5 MB)
   c7.py refresh <libraryId> [--apply]  re-crawl / re-parse a stale library (daily limit)
   c7.py wait <libraryId> [--changed] [--timeout SEC]
                                        poll until the library is indexed and served;
@@ -20,9 +24,10 @@ Every command that changes something is a dry run unless --apply is passed.
   c7.py log                            show what this skill has changed before
 
 Examples:
-  c7.py check https://github.com/acme/widgets https://docs.acme.dev/
-  c7.py allow /acme/widgets --apply
+  c7.py check https://github.com/saalse/context7-add https://docs.acme.dev/
+  c7.py allow /saalse/context7-add --apply
   c7.py add https://docs.acme.dev/guide/ --base-url https://docs.acme.dev/guide/ --apply
+  c7.py add https://github.com/acme/a https://github.com/acme/b https://docs.acme.dev/ --queue --apply
 
 API key: $CONTEXT7_API_KEY, else the context7 MCP entry in ~/.claude.json.
 The key is never printed. Results are JSON on stdout; progress and errors on stderr.
@@ -30,19 +35,27 @@ The key is never printed. Results are JSON on stdout; progress and errors on std
 Exit codes:
   0  success (check: the report was produced, read its fields; wait: ready)
   1  API or network error
-  2  bad input (arguments, file type, unsupported llms.txt name)
+  2  bad input (arguments, file type, unsupported llms.txt name, file too large / 413)
   3  auth: missing/invalid API key, or role/plan too low
   4  library not found
   5  refused by the teamspace policy (access_denied)
   6  rate limited (429)
-  7  library unprocessable (no or too few docs)
+  7  library unprocessable (no or too few docs, or not a documentation website)
   8  wait timed out
+  9  submission queue full (5 libraries already processing). add: `notSubmitted` lists
+     what to resubmit, or rerun with --queue; refresh / upload: try again later
+  130 add: interrupted (Ctrl-C or SIGTERM); the partial summary lists `notSubmitted`
+With several URLs, add exits 130 if interrupted, else with the first real refusal (listed in
+`failed`), else 3, 9 or 6. A 401, 429 or full queue stops the run; that URL and the rest are
+listed in `notSubmitted`.
 """
 import argparse
+import http.client
 import json
 import mimetypes
 import os
 import re
+import signal
 import sys
 import time
 import urllib.error
@@ -56,7 +69,17 @@ SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_PATH = os.path.join(SKILL_DIR, "registry.jsonl")
 
 EXIT_API, EXIT_USAGE, EXIT_AUTH, EXIT_NOT_FOUND = 1, 2, 3, 4
-EXIT_POLICY, EXIT_RATE, EXIT_UNPROCESSABLE, EXIT_TIMEOUT = 5, 6, 7, 8
+EXIT_POLICY, EXIT_RATE, EXIT_UNPROCESSABLE, EXIT_TIMEOUT, EXIT_QUEUE = 5, 6, 7, 8, 9
+EXIT_INTERRUPTED = 130
+
+QUEUE_FULL = "user-has-active-task"  # 400: "You already have 5 libraries being processed or queued"
+QUEUE_POLL_SEC = 30
+DEFAULT_QUEUE_TIMEOUT = 1800
+# Context7 doesn't document an upload limit; in practice the request body is capped at ~4.5 MB
+# (413 FUNCTION_PAYLOAD_TOO_LARGE: ~3 MB goes through, ~5 MB does not). Leave room for the
+# multipart envelope.
+MAX_UPLOAD_BYTES = 4_400_000
+LARGE_UPLOAD_BYTES = 3_000_000  # above this, a dropped connection may be the size limit
 
 
 def fail(code, msg):
@@ -68,8 +91,15 @@ def http_exit_code(status, data):
     err = data.get("error") if isinstance(data, dict) else None
     if status == 403:
         return EXIT_POLICY if err == "access_denied" else EXIT_AUTH
-    return {0: EXIT_API, 400: EXIT_USAGE, 401: EXIT_AUTH, 404: EXIT_NOT_FOUND,
+    if err == QUEUE_FULL:
+        return EXIT_QUEUE
+    return {0: EXIT_API, 400: EXIT_USAGE, 401: EXIT_AUTH, 404: EXIT_NOT_FOUND, 413: EXIT_USAGE,
             422: EXIT_UNPROCESSABLE, 429: EXIT_RATE}.get(status, EXIT_API)
+
+
+def queue_full(data):
+    return isinstance(data, dict) and data.get("error") == QUEUE_FULL
+
 
 REPO_HOSTS = {"github.com": "github", "gitlab.com": "gitlab", "bitbucket.org": "bitbucket"}
 ADD_ENDPOINT = {
@@ -131,9 +161,17 @@ def call(method, path, body=None, params=None, form=None):
         with urllib.request.urlopen(req, timeout=120) as r:
             status, raw = r.status, r.read()
     except urllib.error.HTTPError as e:
-        status, raw = e.code, e.read()
+        status = e.code
+        try:  # the server may send error headers and then drop the connection (seen with 413)
+            raw = e.read()
+        except (OSError, http.client.HTTPException):
+            raw = b""
     except urllib.error.URLError as e:
         return 0, {"error": "network", "message": str(e.reason)}
+    except (OSError, http.client.HTTPException) as e:
+        # Connection reset, remote disconnect or timeout mid-request (seen on large uploads):
+        # report it as JSON like any other network error instead of a traceback.
+        return 0, {"error": "network", "message": f"{type(e).__name__}: {e}"}
     text = raw.decode("utf-8", "replace")
     try:
         return status, json.loads(text)
@@ -147,8 +185,11 @@ def out(obj):
 
 def log(action, **fields):
     entry = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "action": action, **fields}
-    with open(LOG_PATH, "a") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    try:
+        with open(LOG_PATH, "a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as e:  # the change itself went through; don't lose the result over the audit log
+        print(f"warning: could not write {LOG_PATH}: {e}", file=sys.stderr)
 
 
 def get_policies():
@@ -226,8 +267,8 @@ def probe(lib_id):
 
 def website_id_candidates(url):
     """Guess Context7 ids for a docs URL. Observed shapes: docs.github.com/en -> /websites/github_en,
-    nianticspatial.com/docs/scaniverse -> /websites/nianticspatial_scaniverse, docs.astral.sh ->
-    /websites/astral_sh, rfc-editor.org/rfc/ -> /websites/rfc-editor_rfc."""
+    docs.astral.sh -> /websites/astral_sh, rfc-editor.org/rfc/ -> /websites/rfc-editor_rfc; a `docs`
+    path segment is dropped (example.com/docs/guide -> /websites/example_guide)."""
     u = urllib.parse.urlparse(url)
     host = (u.hostname or "").lower()
     for prefix in ("www.", "docs."):
@@ -260,7 +301,7 @@ def site_llms_files(url):
     for i in range(1, len(segs) + 1):
         base = root + "/" + "/".join(segs[:i])
         cands += [f"{base}/llms.txt", f"{base}/llms-full.txt"]
-        if i >= 2:  # e.g. /docs/scaniverse -> /docs/llms-scaniverse.txt
+        if i >= 2:  # e.g. /docs/guide -> /docs/llms-guide.txt
             cands.append(root + "/" + "/".join(segs[:i - 1]) + f"/llms-{segs[i - 1]}.txt")
     found = []
     for c in dict.fromkeys(cands):
@@ -433,62 +474,170 @@ def cmd_allow(args):
     out(result)
 
 
-def cmd_add(args):
-    c = classify(args.url)
+def prepare_add(url, args):
+    """Validate one input and build its request; exits with EXIT_USAGE on bad input."""
+    c = classify(url)
     kind = args.type or c["kind"]
     if kind not in ADD_ENDPOINT:
-        fail(EXIT_USAGE, f"Cannot tell the source type of {args.url!r} (got {kind!r}); pass --type "
+        fail(EXIT_USAGE, f"Cannot tell the source type of {url!r} (got {kind!r}); pass --type "
                  f"{'|'.join(ADD_ENDPOINT)}.")
     if kind == "llmstxt":
-        fname = urllib.parse.urlparse(args.url).path.rstrip("/").split("/")[-1].lower()
+        fname = urllib.parse.urlparse(url).path.rstrip("/").split("/")[-1].lower()
         if fname not in ("llms.txt", "llms-full.txt", "llms-small.txt"):
             fail(EXIT_USAGE, f"Context7 only accepts files named llms.txt, llms-full.txt or llms-small.txt (got {fname!r}). "
                      "For a per-section file, cover the missing pages with a narrow website source instead: "
                      "add <section url> --base-url <section url>.")
     path, field = ADD_ENDPOINT[kind]
-    body = {field: c.get("repoUrl") or args.url}
+    body = {field: c.get("repoUrl") or url}
     is_repo = field == "docsRepoUrl"
     if args.private:
         if not is_repo:
-            fail(EXIT_USAGE, "--private applies to repositories only.")
+            fail(EXIT_USAGE, f"--private applies to repositories only (got {url!r}).")
         body["private"] = True
     if args.generate_docs:
         if not (is_repo and args.private):
-            fail(EXIT_USAGE, "--generate-docs applies to private repositories only.")
+            fail(EXIT_USAGE, f"--generate-docs applies to private repositories only (got {url!r}).")
         body["generateDocs"] = True
     if args.base_url:
         if kind != "website":
-            fail(EXIT_USAGE, "--base-url applies to websites only.")
+            fail(EXIT_USAGE, f"--base-url applies to websites only (got {url!r}).")
         body["websiteBaseUrl"] = args.base_url
     token_note = None
     if args.git_token_env:
         tok = os.environ.get(args.git_token_env)
         if not tok:
             fail(EXIT_USAGE, f"${args.git_token_env} is empty.")
-        body["gitToken"] = tok
-        token_note = f"gitToken from ${args.git_token_env}"
-    shown = {k: ("<redacted>" if k == "gitToken" else v) for k, v in body.items()}
-    if not args.apply:
-        out({"dryRun": True, "would": f"POST {API}{path}", "body": shown,
-             "expectedLibraryId": c["libraryId"], "note": token_note})
-        return
-    status, data = call("POST", path, body=body)
-    result = {"status": status, "response": data, "expectedLibraryId": c["libraryId"]}
-    if status == 200 and isinstance(data, dict):
-        log("add", source=kind, url=body[field], libraryId=data.get("libraryName"),
-            version=data.get("version"), private=bool(args.private))
-        result["libraryId"] = data.get("libraryName")
-    elif status == 409 or (isinstance(data, dict) and data.get("error") == "library-already-exists"):
-        m = re.search(r"(/[\w.@-]+(?:/[\w.@-]+)+)", (data or {}).get("message", "")) if isinstance(data, dict) else None
+        if is_repo:
+            body["gitToken"] = tok
+            token_note = f"gitToken from ${args.git_token_env}"
+        else:  # never hand a git token to a website / llms.txt / OpenAPI submission
+            token_note = f"${args.git_token_env} not sent: a git token applies to repositories only"
+    return {"input": url, "kind": kind, "c": c, "path": path, "field": field, "body": body,
+            "tokenNote": token_note}
+
+
+def submit_add(p, args):
+    """POST one prepared add. Returns (result, exit_code, stop) where stop is "queue", "rate" or
+    "auth" when the remaining inputs would be refused too."""
+    deadline = time.time() + (args.queue_timeout if args.queue_timeout is not None else DEFAULT_QUEUE_TIMEOUT)
+    while True:
+        status, data = call("POST", p["path"], body=p["body"])
+        if not (queue_full(data) and args.queue and time.time() < deadline):
+            break
+        wait = min(QUEUE_POLL_SEC, max(1, int(deadline - time.time())))
+        print(f"queue full (5 libraries processing); retrying {p['input']} in {wait} s", file=sys.stderr)
+        time.sleep(wait)
+    c = p["c"]
+    result = {"input": p["input"], "status": status, "response": data, "expectedLibraryId": c["libraryId"]}
+    err = data.get("error") if isinstance(data, dict) else None
+    code = 0
+    if status == 200:
+        d = data if isinstance(data, dict) else {}
+        log("add", source=p["kind"], url=p["body"][p["field"]], libraryId=d.get("libraryName"),
+            version=d.get("version"), private=bool(args.private))
+        result["libraryId"] = d.get("libraryName")
+    elif status == 409 or err == "library-already-exists":
+        m = re.search(r"(/[\w.@-]+(?:/[\w.@-]+)+)", data.get("message") or "") if isinstance(data, dict) else None
         result["libraryId"] = m.group(1).lower() if m else c["libraryId"]
         result["meaning"] = "already exists in Context7: nothing was created; just make sure it is allowed"
-        status = 409
-    elif status == 403:
-        result["meaning"] = ("refused: if error is access_denied the library id is outside the allowlist "
-                             "(allow it first); otherwise role/plan")
-    out(result)
-    if status not in (200, 409):
-        sys.exit(http_exit_code(status, data))
+    else:
+        code = http_exit_code(status, data)
+        if err == QUEUE_FULL:
+            result["meaning"] = ("not submitted: Context7 allows 5 libraries processing or queued per user. "
+                                 + ("--queue timed out; resubmit later, or rerun with a larger --queue-timeout"
+                                    if args.queue else
+                                    "resubmit later, or rerun with --queue to wait for a free slot"))
+        elif status == 403:
+            result["meaning"] = ("refused: if error is access_denied the library id is outside the allowlist "
+                                 "(allow it first); otherwise role/plan")
+        elif err == "not_documentation_website":
+            result["meaning"] = ("refused for good: Context7 doesn't score this as a documentation site. "
+                                 "Look for a docs subdomain or an llms.txt, or read it on the web")
+        elif status == 429:
+            result["meaning"] = "not submitted: rate limited; wait a few minutes, then resubmit"
+    stop = "queue" if err == QUEUE_FULL else "rate" if status == 429 else "auth" if status == 401 else None
+    return result, code, stop
+
+
+def _sigterm(signum, frame):
+    raise KeyboardInterrupt  # a background run that gets killed still prints its partial summary
+
+
+def cmd_add(args):
+    many = len(args.urls) > 1
+    if many and args.base_url:
+        fail(EXIT_USAGE, "--base-url applies to one website at a time; run add once per website.")
+    if many and args.type:
+        fail(EXIT_USAGE, "--type applies to one URL at a time; leave it out (the type is detected per URL) "
+                         "or run add once per URL that needs it.")
+    if args.queue_timeout is not None and not args.queue:
+        fail(EXIT_USAGE, "--queue-timeout only makes sense with --queue.")
+    if args.queue_timeout is not None and args.queue_timeout < 0:
+        fail(EXIT_USAGE, "--queue-timeout must be 0 or more seconds.")
+    plans = [prepare_add(u, args) for u in args.urls]  # validate everything before submitting anything
+    if not args.apply:
+        dry = [{"dryRun": True, "input": p["input"], "would": f"POST {API}{p['path']}",
+                "body": {k: ("<redacted>" if k == "gitToken" else v) for k, v in p["body"].items()},
+                "expectedLibraryId": p["c"]["libraryId"], "note": p["tokenNote"]} for p in plans]
+        out({"dryRun": True, "results": dry} if many else dry[0])
+        return
+    previous = signal.signal(signal.SIGTERM, _sigterm)
+    results, failed, not_submitted, stopped, interrupted = [], [], [], None, False
+    first_failure, i = 0, 0
+    try:
+        for i, p in enumerate(plans):
+            result, code, stop = submit_add(p, args)
+            results.append(result)
+            if stop:  # recorded before anything else, so an interrupt during the print keeps it
+                not_submitted = [q["input"] for q in plans[i:]]  # this URL too: it never got through
+                stopped = stop
+            resp = result["response"]
+            what = result.get("libraryId") or (resp.get("error") if isinstance(resp, dict) else "") or ""
+            print(f"[{i + 1}/{len(plans)}] {p['input']}: {result['status']} {what}", file=sys.stderr)
+            if stop:  # the queue won't drain mid-loop, a rate limit won't lift, a bad key stays bad
+                break
+            if code:
+                failed.append(p["input"])
+                first_failure = first_failure or code
+    except KeyboardInterrupt:
+        interrupted = True
+        if not stopped:  # by position, so duplicates are kept; the URL in flight may have been accepted
+            not_submitted = [q["input"] for q in plans[len(results):]]
+    finally:
+        signal.signal(signal.SIGTERM, previous)  # a second signal now stops the process as usual
+    if interrupted:  # the run is incomplete: say so before anything else
+        exit_code = EXIT_INTERRUPTED
+    elif first_failure:  # a real refusal matters more than "try again later"
+        exit_code = first_failure
+    elif stopped == "auth":
+        exit_code = EXIT_AUTH
+    elif stopped == "queue":
+        exit_code = EXIT_QUEUE
+    elif stopped == "rate":
+        exit_code = EXIT_RATE
+    else:
+        exit_code = 0
+    if not many and not interrupted:
+        out(results[0])
+        sys.exit(exit_code)
+    summary = {"results": results}
+    if failed:
+        summary["failed"] = failed
+    if not_submitted:
+        summary["notSubmitted"] = not_submitted
+    if interrupted:
+        summary["interrupted"] = True
+        summary["next"] = ("stopped before finishing: resubmit notSubmitted (safe even if the first one "
+                           "was already accepted: Context7 answers library-already-exists)")
+    elif stopped == "queue":
+        summary["next"] = ("Context7's queue holds 5 libraries per user. Resubmit notSubmitted once some "
+                           "finish (`wait <id>`), or rerun add with --queue (run it in the background).")
+    elif stopped == "rate":
+        summary["next"] = "rate limited: wait a few minutes, then resubmit notSubmitted"
+    elif stopped == "auth":
+        summary["next"] = "the API key was refused (401): fix the key, then resubmit notSubmitted"
+    out(summary)
+    sys.exit(exit_code)
 
 
 def library_info(lib_id):
@@ -532,6 +681,16 @@ def multipart(fields, file_field, file_path):
     return head + payload + f"\r\n--{boundary}--\r\n".encode(), f"multipart/form-data; boundary={boundary}"
 
 
+def size_hint(ext, size):
+    how = {".pdf": "Split it by pages and upload each part, e.g. `qpdf --empty --pages in.pdf 1-3 -- in-p1-3.pdf`; "
+                   "put the page range in the file name and --title.",
+           ".docx": "Split the document into smaller files (or remove large images) and upload each part."}.get(
+        ext, "Split the spec into smaller files (for example by tag) or remove large embedded examples.")
+    return (f"The file is {size:,} bytes ({size / 1e6:.2f} MB); Context7 refuses request bodies over about 4.5 MB in practice "
+            f"(413 FUNCTION_PAYLOAD_TOO_LARGE), and this script refuses files over {MAX_UPLOAD_BYTES:,} bytes to leave "
+            f"room for the form envelope. {how}")
+
+
 def cmd_upload(args):
     ext = os.path.splitext(args.file)[1].lower()
     if ext not in UPLOAD_ENDPOINT:
@@ -545,15 +704,32 @@ def cmd_upload(args):
     if args.description:
         fields["description"] = args.description
     size = os.path.getsize(args.file)
+    too_big = size > MAX_UPLOAD_BYTES
+    split_hint = size_hint(ext, size)
     if not args.apply:
-        out({"dryRun": True, "would": f"POST {API}{path}", "file": args.file, "bytes": size, "fields": fields,
-             "note": "Uploaded files are private to the teamspace (source type uploaded_files), "
-                     "not subject to the public allowlist."})
+        dry = {"dryRun": True, "would": f"POST {API}{path}", "file": args.file, "bytes": size, "fields": fields,
+               "note": "Uploaded files are private to the teamspace (source type uploaded_files), "
+                       "not subject to the public allowlist. The library id is built from the file name "
+                       "(for a PDF: /pdf/<prefix>-<file name>-<hash>), not from --title: rename the file "
+                       "first if its name says nothing."}
+        if too_big:
+            dry["sizeWarning"] = split_hint
+        out(dry)
         return
+    if too_big and not args.skip_size_check:
+        fail(EXIT_USAGE, split_hint + " Nothing was sent. If Context7 raised the limit, rerun with --skip-size-check.")
     status, data = call("POST", path, form=multipart(fields, file_field, args.file))
+    result = {"status": status, "response": data}
     if status == 200 and isinstance(data, dict):
         log("upload", file=os.path.basename(args.file), libraryId=data.get("libraryName"))
-    out({"status": status, "response": data})
+        result["libraryId"] = data.get("libraryName")
+    elif status == 413:
+        result["meaning"] = split_hint
+    elif status == 0:
+        result["meaning"] = "network error: check the connection and retry"
+        if size > LARGE_UPLOAD_BYTES:  # a big body can also be cut off by the size limit
+            result["meaning"] += ". The file is large, so Context7 may have refused it for size: " + split_hint
+    out(result)
     if status != 200:
         sys.exit(http_exit_code(status, data))
 
@@ -593,7 +769,7 @@ def cmd_wait(args):
 
 def cmd_log(_):
     if not os.path.exists(LOG_PATH):
-        print("(nothing logged yet)")
+        print("nothing logged yet", file=sys.stderr)  # stdout stays JSON lines (here: none)
         return
     with open(LOG_PATH) as f:
         sys.stdout.write(f.read())
@@ -602,25 +778,60 @@ def cmd_log(_):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("whoami").set_defaults(fn=cmd_whoami)
-    s = sub.add_parser("check"); s.add_argument("inputs", nargs="+"); s.set_defaults(fn=cmd_check)
-    s = sub.add_parser("allow"); s.add_argument("entries", nargs="+")
-    s.add_argument("--remove", action="store_true"); s.add_argument("--apply", action="store_true")
+    apply_help = "make the change; without it the command is a dry run that only prints what it would do"
+
+    def cmd(name, purpose):
+        return sub.add_parser(name, help=purpose, description=purpose + " Exit codes: see `c7.py --help`.")
+
+    s = cmd("whoami", "Show plan, role, policy mode and which list admits libraries.")
+    s.set_defaults(fn=cmd_whoami)
+    s = cmd("check", "Report whether each input is indexed, fresh and allowed by the teamspace policy.")
+    s.add_argument("inputs", nargs="+",
+                   help="repo URL, owner/repo, library id, context7.com URL, docs/llms.txt/OpenAPI URL, "
+                        "GitHub user/org URL, or a name")
+    s.set_defaults(fn=cmd_check)
+    s = cmd("allow", "Add or remove allowlist / wild-card entries.")
+    s.add_argument("entries", nargs="+", help="/owner/repo (one library), /owner (all of it), or a docs domain")
+    s.add_argument("--remove", action="store_true", help="remove the entries instead of adding them")
+    s.add_argument("--apply", action="store_true", help=apply_help)
     s.set_defaults(fn=cmd_allow)
-    s = sub.add_parser("add"); s.add_argument("url")
-    s.add_argument("--type", choices=list(ADD_ENDPOINT)); s.add_argument("--private", action="store_true")
-    s.add_argument("--generate-docs", action="store_true"); s.add_argument("--base-url")
-    s.add_argument("--git-token-env", help="name of an env var holding a git token (never pass the token itself)")
-    s.add_argument("--apply", action="store_true"); s.set_defaults(fn=cmd_add)
-    s = sub.add_parser("upload"); s.add_argument("file"); s.add_argument("--title"); s.add_argument("--description")
-    s.add_argument("--apply", action="store_true"); s.set_defaults(fn=cmd_upload)
-    s = sub.add_parser("refresh"); s.add_argument("library_id"); s.add_argument("--apply", action="store_true")
+    s = cmd("add", "Submit repos, websites, llms.txt or OpenAPI URLs for indexing.")
+    s.add_argument("urls", nargs="+", metavar="url", help="one or more sources; all are validated before any is sent")
+    s.add_argument("--type", choices=list(ADD_ENDPOINT),
+                   help="force the source type when it can't be detected (one URL only)")
+    s.add_argument("--private", action="store_true", help="index a private repository (paid plan)")
+    s.add_argument("--generate-docs", action="store_true",
+                   help="private repositories only: let Context7 generate docs from the code")
+    s.add_argument("--base-url", help="websites only: crawl only pages under this URL (one URL only)")
+    s.add_argument("--git-token-env", metavar="VAR",
+                   help="name of an env var holding a git token for repositories (never pass the token itself)")
+    s.add_argument("--queue", action="store_true",
+                   help="when the 5-submission queue is full, wait and retry instead of stopping")
+    s.add_argument("--queue-timeout", type=int, default=None, metavar="SEC",
+                   help=f"with --queue, per URL: give up waiting for a free slot after SEC seconds "
+                        f"(default {DEFAULT_QUEUE_TIMEOUT})")
+    s.add_argument("--apply", action="store_true", help=apply_help)
+    s.set_defaults(fn=cmd_add)
+    s = cmd("upload", "Upload a PDF, DOCX or OpenAPI file (private to the teamspace, max ~4.5 MB).")
+    s.add_argument("file", help="a .pdf, .docx, or OpenAPI .json/.yaml/.yml file")
+    s.add_argument("--title", help="library display name (the id still comes from the file name)")
+    s.add_argument("--description", help="short summary of the document")
+    s.add_argument("--skip-size-check", action="store_true",
+                   help="send a file over the ~4.5 MB limit anyway (only if Context7 raised the limit)")
+    s.add_argument("--apply", action="store_true", help=apply_help)
+    s.set_defaults(fn=cmd_upload)
+    s = cmd("refresh", "Re-crawl or re-parse a stale library (daily limit).")
+    s.add_argument("library_id", help="library id, e.g. /owner/repo")
+    s.add_argument("--apply", action="store_true", help=apply_help)
     s.set_defaults(fn=cmd_refresh)
-    s = sub.add_parser("wait"); s.add_argument("library_id")
-    s.add_argument("--timeout", type=int, default=900); s.add_argument("--interval", type=int, default=20)
+    s = cmd("wait", "Poll until a library is indexed and served.")
+    s.add_argument("library_id", help="library id, e.g. /owner/repo")
+    s.add_argument("--timeout", type=int, default=900, metavar="SEC", help="give up after SEC seconds (default 900)")
+    s.add_argument("--interval", type=int, default=20, metavar="SEC", help="seconds between polls (default 20)")
     s.add_argument("--changed", action="store_true", help="after a refresh: wait until lastUpdateDate moves")
     s.set_defaults(fn=cmd_wait)
-    sub.add_parser("log").set_defaults(fn=cmd_log)
+    s = cmd("log", "Print what this skill changed before (registry.jsonl, one JSON object per line).")
+    s.set_defaults(fn=cmd_log)
     args = p.parse_args()
     args.fn(args)
 

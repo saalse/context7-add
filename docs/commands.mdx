@@ -11,8 +11,8 @@ pass `--apply`.
 python3 scripts/c7.py whoami
 python3 scripts/c7.py check <url|/org/repo|name>...
 python3 scripts/c7.py allow <entry>... [--remove] [--apply]
-python3 scripts/c7.py add <url> [--type T] [--base-url URL] [--private] [--git-token-env VAR] [--apply]
-python3 scripts/c7.py upload <file.pdf|.docx|openapi.yaml> [--title T] [--apply]
+python3 scripts/c7.py add <url>... [--type T] [--base-url URL] [--private] [--git-token-env VAR] [--queue [--queue-timeout SEC]] [--apply]
+python3 scripts/c7.py upload <file.pdf|.docx|openapi.yaml> [--title T] [--description D] [--skip-size-check] [--apply]
 python3 scripts/c7.py refresh <libraryId> [--apply]
 python3 scripts/c7.py wait <libraryId> [--changed] [--timeout SEC]
 python3 scripts/c7.py log
@@ -23,11 +23,54 @@ python3 scripts/c7.py log
 | `whoami` | plan, role, policy mode, which list admits libraries |
 | `check` | state, freshness and coverage per input; guessed website ids; the site's llms.txt files; a GitHub owner's repos |
 | `allow` | add or remove allowlist / wild-card entries, with a dry-run library count |
-| `add` | submit a repo, website, llms.txt or OpenAPI URL; reports the existing id if Context7 already has it |
-| `upload` | upload a PDF, DOCX or OpenAPI file (private to the teamspace) |
+| `add` | submit one or more repo, website, llms.txt or OpenAPI URLs; reports the existing id if Context7 already has it. See [Add many sources](#add-many-sources) |
+| `upload` | upload a PDF, DOCX or OpenAPI file up to ~4.5 MB (private to the teamspace). See [Upload a file](/upload) |
 | `refresh` | re-crawl or re-parse a stale library (daily limit) |
 | `wait` | poll until indexed; `--changed` waits until a refresh lands |
 | `log` | the audit trail of applied changes |
+
+## Add many sources
+
+Context7 lets each user have at most **5 libraries processing or queued** at a time. A sixth
+submission is refused with `400 user-has-active-task`. Pass every URL to one `add` call. In
+select mode, allow public repos first: their submission is gated by the policy.
+
+```bash
+python3 scripts/c7.py allow /acme/a /acme/b --apply
+python3 scripts/c7.py add https://github.com/acme/a https://github.com/acme/b https://docs.acme.dev/ --apply
+```
+
+All inputs are validated before anything is sent, and stderr gets one progress line per URL.
+When the queue fills up, Context7 answers 429 (rate limited), or the key is refused (401),
+`add` stops: the remaining URLs would be refused too. With several URLs, the output lists what
+was not submitted, starting with the URL that hit the limit:
+
+```json
+{
+  "results": [
+    {"input": "https://github.com/acme/a", "status": 200, "libraryId": "/acme/a", "...": "..."},
+    {"input": "https://github.com/acme/b", "status": 400,
+     "response": {"error": "user-has-active-task", "message": "You already have 5 libraries being processed or queued. ..."},
+     "meaning": "not submitted: Context7 allows 5 libraries processing or queued per user. ..."}
+  ],
+  "notSubmitted": ["https://github.com/acme/b", "https://docs.acme.dev/"],
+  "next": "Context7's queue holds 5 libraries per user. Resubmit notSubmitted once some finish ..."
+}
+```
+
+URLs refused for another reason (policy, not a documentation site, and so on) are listed in
+`failed`; they aren't retried, and the exit code is the first such refusal. Only when nothing
+failed for real is the exit code 3 (key refused), 9 (queue full) or 6 (rate limited).
+
+To submit everything in one go, add `--queue`. When the queue is full, `add` then waits 30 s
+and retries the same URL, for up to `--queue-timeout` seconds per URL (default 1800). Indexing
+takes minutes, so run it in the background. If the run is stopped (Ctrl-C or SIGTERM), it still
+prints the summary so far, with `"interrupted": true` and `notSubmitted`, and exits 130,
+whatever else happened before. The URL that was being sent may already have been accepted;
+resubmitting it is safe, because Context7 answers `library-already-exists`.
+
+`--type` and `--base-url` apply to one URL, so they can't be combined with several URLs; the
+type is detected per URL otherwise.
 
 ## Exit codes
 
@@ -35,10 +78,12 @@ python3 scripts/c7.py log
 |---|---|
 | 0 | success (`check`: report produced; `wait`: ready) |
 | 1 | API or network error |
-| 2 | bad input |
+| 2 | bad input, or a file too large to upload (over ~4.5 MB, or a 413) |
 | 3 | missing or invalid key, or role/plan too low |
 | 4 | library not found |
 | 5 | refused by the teamspace policy |
 | 6 | rate limited |
-| 7 | unprocessable (no or too few docs) |
+| 7 | unprocessable (no or too few docs), or not a documentation website |
 | 8 | `wait` timed out |
+| 9 | submission queue full (5 libraries already processing). `add`: resubmit `notSubmitted` or use `--queue`; `refresh`, `upload`: try again later |
+| 130 | `add`: interrupted; the partial summary lists `notSubmitted` |

@@ -1,0 +1,157 @@
+---
+title: Upload a file
+description: Upload a PDF, DOCX or OpenAPI file to Context7 with c7.py upload, the endpoints and multipart fields it uses, the size limit, and what happens after.
+---
+
+Use `upload` when the docs exist only as a file: a PDF manual or paper, a Word document, or an
+OpenAPI spec that isn't published at a URL. (For a spec that has a URL, use `add <url>`
+instead, so Context7 can refresh it.) Like every command that changes something, it is a dry
+run until you pass `--apply`.
+
+```bash
+python3 scripts/c7.py upload <file> [--title TITLE] [--description TEXT] [--skip-size-check] [--apply]
+```
+
+| Option | What it does |
+|---|---|
+| `<file>` | path to a `.pdf`, `.docx`, or an OpenAPI `.json`, `.yaml` or `.yml` file |
+| `--title` | the library's display name; sent as `projectTitle` (PDF, DOCX) or `libraryTitle` (OpenAPI). If you leave it out, no title field is sent and Context7 chooses the name |
+| `--description` | a short summary of the document, sent as the `description` field |
+| `--skip-size-check` | send a file over the ~4.5 MB limit anyway; only useful if Context7 has raised the limit |
+| `--apply` | actually upload; without it the command only prints what it would send |
+
+## Example: upload a PDF
+
+Preview first:
+
+```bash
+python3 scripts/c7.py upload acme-handbook.pdf --title "Acme Handbook" --description "Internal engineering handbook"
+```
+
+```json
+{
+  "dryRun": true,
+  "would": "POST https://context7.com/api/v2/add/pdf-upload",
+  "file": "acme-handbook.pdf",
+  "bytes": 1200000,
+  "fields": {
+    "projectTitle": "Acme Handbook",
+    "description": "Internal engineering handbook"
+  },
+  "note": "Uploaded files are private to the teamspace (source type uploaded_files), not subject to the public allowlist. The library id is built from the file name (for a PDF: /pdf/<prefix>-<file name>-<hash>), not from --title: rename the file first if its name says nothing."
+}
+```
+
+The dry run checks the file type, that the file exists, and its size. It sends nothing and
+needs no API key. When the preview looks right, upload it. The response looks like this; the
+id's prefix and hash differ for every upload:
+
+```bash
+python3 scripts/c7.py upload acme-handbook.pdf --title "Acme Handbook" --description "Internal engineering handbook" --apply
+```
+
+```json
+{
+  "status": 200,
+  "response": {
+    "libraryName": "/pdf/1a2b3c4d-acme-handbook.pdf-9f8e7d6c",
+    "message": "PDF file uploaded successfully"
+  },
+  "libraryId": "/pdf/1a2b3c4d-acme-handbook.pdf-9f8e7d6c"
+}
+```
+
+`libraryId` is the new library. The upload is written to the audit log (`c7.py log`). Query
+it with the Context7 MCP `query-docs` tool once indexing finishes, or follow it with
+`python3 scripts/c7.py wait <libraryId>`.
+
+## Name the file before you upload
+
+The library id comes from the **file name**, not from `--title`:
+`/pdf/<prefix>-<file name>-<hash>`. An upload of `scan_0042_final.pdf` gets an
+id nobody can read later. Rename it first, to something like `acme-widget-manual-2024.pdf`.
+
+## Size limit
+
+Context7 doesn't document an upload limit, but in practice the request body is capped at about
+**4.5 MB**. Files around 3 MB upload fine, while files around 5 MB and larger are refused with
+`413 FUNCTION_PAYLOAD_TOO_LARGE`. So the script checks the size first:
+
+- the dry run adds a `sizeWarning` for a file over 4.4 MB;
+- `--apply` refuses to send it (exit code 2) unless you pass `--skip-size-check`;
+- if Context7 still answers 413, the result carries a `meaning` with the fix.
+
+Recompressing rarely helps, because figures in papers are already compressed. Split the file by
+pages instead, for example with `qpdf`, and upload each part:
+
+```bash
+qpdf --empty --pages paper.pdf 1-3 -- acme-paper-p1-3.pdf
+qpdf --empty --pages paper.pdf 4-6 -- acme-paper-p4-6.pdf
+python3 scripts/c7.py upload acme-paper-p1-3.pdf --title "Acme paper, pages 1-3" --apply
+python3 scripts/c7.py upload acme-paper-p4-6.pdf --title "Acme paper, pages 4-6" --apply
+```
+
+Each part becomes its own library, so put the page range in both the file name and `--title`.
+A single page that is still over the limit (one large figure) can't be uploaded as-is. For a
+DOCX, split the document or remove large images; for an OpenAPI spec, split it (for example by
+tag) or drop large embedded examples.
+
+## Example: upload an OpenAPI spec
+
+```bash
+python3 scripts/c7.py upload acme-openapi.yaml --title "Acme API" --apply
+```
+
+OpenAPI files go to a different endpoint and use `libraryTitle` instead of `projectTitle`;
+the script picks both from the file extension.
+
+## Endpoints and form fields
+
+Each upload is one `multipart/form-data` POST to the Context7 API, authenticated with your API
+key as `Authorization: Bearer <key>`.
+
+| File | Endpoint | File field | Title field |
+|---|---|---|---|
+| `.pdf` | `POST https://context7.com/api/v2/add/pdf-upload` | `pdfFile` | `projectTitle` |
+| `.docx` | `POST https://context7.com/api/v2/add/docx-upload` | `docxFile` | `projectTitle` |
+| `.json`, `.yaml`, `.yml` (OpenAPI) | `POST https://context7.com/api/v2/add/openapi-upload` | `openapiFile` | `libraryTitle` |
+
+All three also accept an optional `description` field. The file part carries the file name
+and a content type guessed from the extension (`application/pdf`, for example).
+
+The same PDF upload with `curl`:
+
+```bash
+curl -X POST https://context7.com/api/v2/add/pdf-upload \
+  -H "Authorization: Bearer $CONTEXT7_API_KEY" \
+  -F "pdfFile=@acme-handbook.pdf" \
+  -F "projectTitle=Acme Handbook" \
+  -F "description=Internal engineering handbook"
+```
+
+## Privacy and access
+
+- Uploaded files are private to your teamspace. They are not public libraries, so they need
+  no allowlist or wild-card entry (`allow` is not needed).
+- Your teamspace must have the **Uploaded Files** source type turned on (`whoami` shows
+  `sourceTypes.uploaded_files`), or the Context7 MCP won't serve them. See Context7's
+  [data privacy settings](https://context7.com/docs/security/data-privacy).
+
+## Updating an uploaded file
+
+Context7 can't refresh uploaded files: `refresh` works only for sources it can fetch again, like
+repos, websites, `llms.txt` and OpenAPI URLs. To update an uploaded file, upload the new version
+again ([Context7: keeping libraries fresh](https://context7.com/docs/library-updates)).
+
+## Errors and exit codes
+
+| Code | When |
+|---|---|
+| 0 | dry run printed, or upload accepted |
+| 1 | network error (on a file over 3 MB, the result adds that it may be a size refusal), or an unexpected API error |
+| 2 | unsupported file type, missing file, file over 4.4 MB (nothing sent), a 413 from Context7, or another 400 |
+| 3 | missing or invalid API key, or role/plan too low |
+| 5 | refused by the teamspace policy |
+| 6 | rate limited |
+| 7 | Context7 could not process the file (422) |
+| 9 | Context7's per-user submission queue is full; upload again later |

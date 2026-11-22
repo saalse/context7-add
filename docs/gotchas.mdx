@@ -10,12 +10,12 @@ description: Context7 behaviours that contradict reasonable assumptions, found i
   official source first; an RFC is `https://www.rfc-editor.org/rfc/rfcNNNN.html`, which
   lives in `/websites/rfc-editor_rfc`.
 - **Website ids drop parts of the URL.** `docs.` / `www.`, `.com` / `.org` / `.net` and a
-  `docs` path segment are removed: `nianticspatial.com/docs/scaniverse` →
-  `/websites/nianticspatial_scaniverse`.
+  `docs` path segment are removed: `docs.github.com/en` → `/websites/github_en`,
+  `example.com/docs/guide` → `/websites/example_guide`.
 - **A domain entry is about docs sites, not repo hosts.** A `github.com` entry does not admit
   GitHub repos.
-- **"Already exists" is a 400, not a 409.** Submitting a site Context7 already has returns
-  `library-already-exists` with the id in the message, and creates nothing.
+- **"Already exists" is a 400, not a 409.** Submitting a repo or site Context7 already has
+  returns `library-already-exists` with the id in the message, and creates nothing.
 - **Exists is not the same as covered.** A library can be months old and missing pages, or
   empty while a more specific sibling has the content. Refresh stale ones.
 - **Crawls only follow the site's menu.** Unlinked pages stay out even after a refresh; the
@@ -25,5 +25,11 @@ description: Context7 behaviours that contradict reasonable assumptions, found i
   `unprocessable`, and the failed library remains in the index.
 - **The library count ignores empty libraries.** A policy dry run doesn't move for libraries
   that are empty or still processing.
+- **Only 5 submissions at a time.** A sixth `add` while 5 libraries are processing gets
+  `400 user-has-active-task`. Pass all URLs to one `add --queue` call.
+- **Uploads stop at about 4.5 MB.** Larger files get `413 FUNCTION_PAYLOAD_TOO_LARGE`. Split
+  PDFs by pages. The library id comes from the file name, not the title, so name the file well.
+- **Some sites are refused as "not documentation".** `422 not_documentation_website`
+  ("Website score 1 below threshold 9") is final for that URL: marketing sites and blogs get it.
 - **Claiming needs a Write-access key.** The management API (`/v2/teamspaces/…`) answers
   `write_access_required` to a normal key; use the dashboard instead.
