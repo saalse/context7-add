@@ -91,7 +91,7 @@ The tests are offline: they stub the Context7 API, so they need no key or networ
 python3 -m unittest discover -s tests -v
 ```
 
-CI runs them on Python 3.8 to 3.13, validates the skill against the Agent Skills
+CI runs them on Python 3.8 to 3.14, validates the skill against the Agent Skills
 specification, and prints a coverage report.
 
 ## Notes

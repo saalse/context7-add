@@ -79,8 +79,8 @@ These come from real runs and contradict reasonable assumptions:
 - **Only 5 submissions in flight per user.** More get `400 user-has-active-task` (exit 9).
   Pass all URLs to one `add … --queue --apply` and run it in the background. It waits for free
   slots, so don't write your own retry loop. Without `--queue`, resubmit the output's
-  `notSubmitted` list later. URLs refused for other reasons are in `failed`, and the exit code
-  is the first such refusal. `--type` and `--base-url` need one URL per call.
+  `notSubmitted` list later. URLs refused for other reasons, or lost to a network error, are in
+  `failed`, and the exit code is the first such failure. `--type` and `--base-url` need one URL per call.
 - **Uploads stop at about 4.5 MB** (`413 FUNCTION_PAYLOAD_TOO_LARGE`). `upload` refuses larger
   files before sending. Split a PDF by pages (`qpdf --empty --pages in.pdf 1-3 -- in-p1-3.pdf`),
   one upload per part, with the page range in the file name and `--title`.

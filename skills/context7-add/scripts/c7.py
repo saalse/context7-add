@@ -42,11 +42,12 @@ Exit codes:
   6  rate limited (429)
   7  library unprocessable (no or too few docs, or not a documentation website)
   8  wait timed out
-  9  submission queue full (5 libraries already processing). add: `notSubmitted` lists
-     what to resubmit, or rerun with --queue; refresh / upload: try again later
+  9  submission queue full (5 libraries already processing). add: resubmit later (with
+     several URLs, `notSubmitted` lists which) or rerun with --queue; refresh / upload:
+     try again later
   130 add: interrupted (Ctrl-C or SIGTERM); the partial summary lists `notSubmitted`
-With several URLs, add exits 130 if interrupted, else with the first real refusal (listed in
-`failed`), else 3, 9 or 6. A 401, 429 or full queue stops the run; that URL and the rest are
+With several URLs, add exits 130 if interrupted, else with the first failure (a refusal or a
+network error, listed in `failed`), else 3, 9 or 6. A 401, 429 or full queue stops the run; that URL and the rest are
 listed in `notSubmitted`.
 """
 import argparse
@@ -166,6 +167,11 @@ def call(method, path, body=None, params=None, form=None):
             raw = e.read()
         except (OSError, http.client.HTTPException):
             raw = b""
+        finally:
+            try:
+                e.close()
+            except (OSError, http.client.HTTPException):
+                pass
     except urllib.error.URLError as e:
         return 0, {"error": "network", "message": str(e.reason)}
     except (OSError, http.client.HTTPException) as e:
@@ -555,6 +561,8 @@ def submit_add(p, args):
                                  "Look for a docs subdomain or an llms.txt, or read it on the web")
         elif status == 429:
             result["meaning"] = "not submitted: rate limited; wait a few minutes, then resubmit"
+        elif status == 0:
+            result["meaning"] = "network error: Context7 may not have received it; safe to resubmit"
     stop = "queue" if err == QUEUE_FULL else "rate" if status == 429 else "auth" if status == 401 else None
     return result, code, stop
 
@@ -775,7 +783,7 @@ def cmd_log(_):
         sys.stdout.write(f.read())
 
 
-def main():
+def build_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     apply_help = "make the change; without it the command is a dry run that only prints what it would do"
@@ -832,7 +840,11 @@ def main():
     s.set_defaults(fn=cmd_wait)
     s = cmd("log", "Print what this skill changed before (registry.jsonl, one JSON object per line).")
     s.set_defaults(fn=cmd_log)
-    args = p.parse_args()
+    return p
+
+
+def main():
+    args = build_parser().parse_args()
     args.fn(args)
 
 

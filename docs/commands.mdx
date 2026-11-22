@@ -41,7 +41,7 @@ python3 scripts/c7.py add https://github.com/acme/a https://github.com/acme/b ht
 ```
 
 All inputs are validated before anything is sent, and stderr gets one progress line per URL.
-When the queue fills up, Context7 answers 429 (rate limited), or the key is refused (401),
+When the queue is full, when Context7 rate-limits you (429), or when the key is refused (401),
 `add` stops: the remaining URLs would be refused too. With several URLs, the output lists what
 was not submitted, starting with the URL that hit the limit:
 
@@ -58,8 +58,9 @@ was not submitted, starting with the URL that hit the limit:
 }
 ```
 
-URLs refused for another reason (policy, not a documentation site, and so on) are listed in
-`failed`; they aren't retried, and the exit code is the first such refusal. Only when nothing
+URLs refused for another reason (policy, not a documentation site, and so on) or lost to a
+network error are listed in `failed`; they aren't retried, and the exit code is the first such
+failure. A network error is safe to resubmit. Only when nothing
 failed for real is the exit code 3 (key refused), 9 (queue full) or 6 (rate limited).
 
 To submit everything in one go, add `--queue`. When the queue is full, `add` then waits 30 s
@@ -85,5 +86,5 @@ type is detected per URL otherwise.
 | 6 | rate limited |
 | 7 | unprocessable (no or too few docs), or not a documentation website |
 | 8 | `wait` timed out |
-| 9 | submission queue full (5 libraries already processing). `add`: resubmit `notSubmitted` or use `--queue`; `refresh`, `upload`: try again later |
+| 9 | submission queue full (5 libraries already processing). `add`: resubmit later (with several URLs, `notSubmitted` lists which) or use `--queue`; `refresh`, `upload`: try again later |
 | 130 | `add`: interrupted; the partial summary lists `notSubmitted` |

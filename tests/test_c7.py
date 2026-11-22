@@ -9,7 +9,10 @@ import io
 import json
 import os
 import signal
+import sys
 import tempfile
+import time
+import types
 import unittest
 import urllib.error
 import urllib.request
@@ -41,7 +44,8 @@ class C7TestCase(unittest.TestCase):
         self.c7 = load_c7()
         self.sent, self.logged, self.sleeps = [], [], []
         self.c7.log = lambda action, **kw: self.logged.append((action, kw))
-        self.c7.time.sleep = lambda s: self.sleeps.append(s)
+        # c7's own `time` name only: the real time module stays untouched
+        self.c7.time = types.SimpleNamespace(time=time.time, sleep=lambda s: self.sleeps.append(s))
         self.c7.api_key = lambda: "test-key"
         self.sigterm = signal.getsignal(signal.SIGTERM)
         self.tmp = tempfile.TemporaryDirectory()
@@ -62,7 +66,6 @@ class C7TestCase(unittest.TestCase):
         self.c7.call = fake_call
         out, err, code = io.StringIO(), io.StringIO(), 0
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            import sys
             old_argv, sys.argv = sys.argv, ["c7.py"] + list(argv)
             try:
                 self.c7.main()
@@ -70,6 +73,7 @@ class C7TestCase(unittest.TestCase):
                 code = e.code or 0
             finally:
                 sys.argv = old_argv
+        self.assertEqual(queue, [], "stubbed responses left unused")
         text = out.getvalue()
         return code, (json.loads(text) if text.strip() else None), err.getvalue()
 
@@ -194,6 +198,13 @@ class TestAddMany(C7TestCase):
         self.assertEqual(len(self.sent), 1)
         self.assertNotIn("failed", o)
         self.assertEqual(o["notSubmitted"], [A, B, C])
+
+    def test_network_error_goes_to_failed_and_says_resubmit(self):
+        code, o, _ = self.run_c7(["add", A, B, "--apply"],
+                                 [(0, {"error": "network", "message": "timed out"}), ok("/acme/b")])
+        self.assertEqual(code, 1)
+        self.assertEqual(o["failed"], [A])
+        self.assertIn("safe to resubmit", o["results"][0]["meaning"])
 
     def test_dry_run_lists_every_input(self):
         code, o, _ = self.run_c7(["add", A, C])
@@ -358,9 +369,14 @@ class TestCall(unittest.TestCase):
 
 
 class TestLog(unittest.TestCase):
+    def missing_path(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(os.rmdir, base)
+        return os.path.join(base, "missing", "registry.jsonl")
+
     def test_write_failure_only_warns(self):
         c7 = load_c7()
-        c7.LOG_PATH = os.path.join(tempfile.gettempdir(), "no-such-dir-c7-test", "registry.jsonl")
+        c7.LOG_PATH = self.missing_path()
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             c7.log("add", libraryId="/acme/a")
@@ -368,7 +384,7 @@ class TestLog(unittest.TestCase):
 
     def test_empty_log_prints_nothing_on_stdout(self):
         c7 = load_c7()
-        c7.LOG_PATH = os.path.join(tempfile.gettempdir(), "no-such-dir-c7-test", "registry.jsonl")
+        c7.LOG_PATH = self.missing_path()
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
             c7.cmd_log(None)
@@ -376,20 +392,170 @@ class TestLog(unittest.TestCase):
 
 
 class TestHelp(C7TestCase):
-    def test_every_command_has_help(self):
-        for name in ("whoami", "check", "allow", "add", "upload", "refresh", "wait", "log"):
+    PURPOSES = {"whoami": "Show plan, role, policy mode", "check": "Report whether each input is indexed",
+                "allow": "Add or remove allowlist", "add": "Submit repos, websites",
+                "upload": "Upload a PDF, DOCX or OpenAPI file", "refresh": "Re-crawl or re-parse",
+                "wait": "Poll until a library is indexed", "log": "Print what this skill changed"}
+
+    def help_text(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            old, sys.argv = sys.argv, ["c7.py"] + list(argv) + ["--help"]
+            try:
+                self.c7.main()
+            except SystemExit as e:
+                self.assertEqual(e.code, 0)
+            finally:
+                sys.argv = old
+        return " ".join(out.getvalue().split())  # argparse wraps to the terminal width
+
+    def test_every_command_has_its_own_purpose(self):
+        for name, purpose in self.PURPOSES.items():
             with self.subTest(command=name):
-                out = io.StringIO()
-                with contextlib.redirect_stdout(out):
-                    import sys
-                    old, sys.argv = sys.argv, ["c7.py", name, "--help"]
-                    try:
-                        self.c7.main()
-                    except SystemExit as e:
-                        self.assertEqual(e.code, 0)
-                    finally:
-                        sys.argv = old
-                self.assertIn("Exit codes", out.getvalue())
+                self.assertIn(purpose, self.help_text(name))
+
+    def test_top_level_help_lists_exit_codes(self):
+        text = self.help_text()
+        for code in ("9 submission queue full", "130 add: interrupted"):
+            self.assertIn(code, text)
+
+    def test_every_flag_has_help_text(self):
+        for name in self.PURPOSES:
+            with self.subTest(command=name):
+                sub = self.subparsers()[name]
+                for action in sub._actions:
+                    if action.option_strings and action.dest != "help":
+                        self.assertTrue(action.help, f"{name} {action.option_strings} has no help")
+
+    def subparsers(self):
+        parser = self.c7.build_parser()
+        action = next(a for a in parser._actions if a.__class__.__name__ == "_SubParsersAction")
+        return action.choices
+
+
+@unittest.skipUnless(hasattr(signal, "SIGTERM") and os.name == "posix", "needs POSIX signals")
+class TestRealSigterm(C7TestCase):
+    def test_sigterm_during_a_request_prints_partial_summary(self):
+        """A real SIGTERM, delivered while the second request is in flight, runs c7's own handler."""
+
+        class StraySigterm(Exception):
+            pass
+
+        def guard(signum, frame):  # if c7 failed to install its handler, fail this test, not the run
+            raise StraySigterm("SIGTERM reached the test's guard handler: c7 did not install its own")
+
+        signal.signal(signal.SIGTERM, guard)
+        answers = [ok("/acme/a")]
+
+        def fake_call(method, path, body=None, params=None, form=None):
+            self.sent.append((method, path, body))
+            if answers:
+                return answers.pop(0)
+            self.assertIs(signal.getsignal(signal.SIGTERM), self.c7._sigterm)
+            os.kill(os.getpid(), signal.SIGTERM)  # c7's handler turns this into KeyboardInterrupt
+            time.sleep(5)  # interrupted as soon as the signal is handled
+            return ok("/acme/b")
+
+        self.c7.call = fake_call
+        code, o, _ = self.run_main(["add", A, B, C, "--apply"])
+        self.assertEqual(code, 130)
+        self.assertTrue(o["interrupted"])
+        self.assertEqual(o["notSubmitted"], [B, C])
+        self.assertIs(signal.getsignal(signal.SIGTERM), guard)  # c7 put back what it found
+
+    def run_main(self, argv):
+        out, err, code = io.StringIO(), io.StringIO(), 0
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            old_argv, sys.argv = sys.argv, ["c7.py"] + list(argv)
+            try:
+                self.c7.main()
+            except SystemExit as e:
+                code = e.code or 0
+            finally:
+                sys.argv = old_argv
+        return code, json.loads(out.getvalue()), err.getvalue()
+
+
+class TestOtherCommands(C7TestCase):
+    POLICIES = (200, {"libraryFilters": {"mode": "select", "select": {"allowedLibraries": ["/acme"]}},
+                      "accessibleLibraryCount": 10, "sourceTypes": {}})
+
+    def test_check_library_id_covered(self):
+        search = (200, {"results": [{"id": "/acme/a", "title": "A", "state": "finalized",
+                                     "lastUpdateDate": "2026-01-01", "totalSnippets": 5, "totalTokens": 9}]})
+        code, o, _ = self.run_c7(["check", "/acme/a"], [self.POLICIES, (200, {}), search])
+        r = o["results"][0]
+        self.assertEqual(code, 0)
+        self.assertEqual((r["state"], r["coveredBy"]), ("ready", ["/acme"]))
+        self.assertEqual(r["index"]["totalSnippets"], 5)
+
+    def test_check_blocked_library(self):
+        _, o, _ = self.run_c7(["check", "/other/x"],
+                              [self.POLICIES, (403, {"error": "access_denied", "message": "no"})])
+        self.assertEqual((o["results"][0]["state"], o["results"][0]["coveredBy"]),
+                         ("blocked_by_policy_or_plan", []))
+
+    def test_allow_dry_run_and_already_present(self):
+        code, o, _ = self.run_c7(["allow", "/other/x"],
+                                 [self.POLICIES, (200, {"currentAccessibleLibraryCount": 10, "accessibleLibraryCount": 11})])
+        self.assertEqual(code, 0)
+        self.assertTrue(o["dryRun"])
+        self.assertEqual(self.sent[1][2]["dryRun"], True)
+        self.assertEqual(o["operation"], {"add": ["/other/x"]})
+        _, o, _ = self.run_c7(["allow", "/acme"], [self.POLICIES])
+        self.assertEqual(o["alreadyInDesiredState"], ["/acme"])
+
+    def test_allow_rejects_bad_entry(self):
+        code, _, _ = self.run_c7(["allow", "not an entry"])
+        self.assertEqual(code, 2)
+
+    def test_refresh_dry_run_and_queue_full(self):
+        search = (200, {"results": []})
+        code, o, _ = self.run_c7(["refresh", "/acme/a"], [search])
+        self.assertEqual((code, o["dryRun"]), (0, True))
+        code, _, _ = self.run_c7(["refresh", "/acme/a", "--apply"], [search, QUEUE_FULL])
+        self.assertEqual(code, 9)
+
+
+class TestHelpers(C7TestCase):
+    def test_api_key_from_env(self):
+        c7 = load_c7()
+        old = os.environ.get("CONTEXT7_API_KEY")
+        os.environ["CONTEXT7_API_KEY"] = "env-key"
+        self.addCleanup(lambda: os.environ.pop("CONTEXT7_API_KEY") if old is None
+                        else os.environ.__setitem__("CONTEXT7_API_KEY", old))
+        self.assertEqual(c7.api_key(), "env-key")
+
+    def test_api_key_from_claude_json(self):
+        c7 = load_c7()
+        home = tempfile.mkdtemp()
+        self.addCleanup(lambda: (os.remove(os.path.join(home, ".claude.json")), os.rmdir(home)))
+        with open(os.path.join(home, ".claude.json"), "w") as f:
+            json.dump({"mcpServers": {"context7-admin": {"headers": {"CONTEXT7_API_KEY": "admin-key"}},
+                                      "context7": {"headers": {"Authorization": "Bearer file-key"}}}}, f)
+        saved = {k: os.environ.get(k) for k in ("HOME", "CONTEXT7_API_KEY")}
+
+        def restore():
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        self.addCleanup(restore)
+        os.environ.pop("CONTEXT7_API_KEY", None)
+        os.environ["HOME"] = home
+        self.assertEqual(c7.api_key(), "file-key")  # the admin MCP entry is skipped
+
+    def test_multipart_body(self):
+        path = self.make_file("doc.pdf", data=b"%PDF-1.4 body")
+        body, ctype = self.c7.multipart({"projectTitle": "T"}, "pdfFile", path)
+        boundary = ctype.split("boundary=")[1]
+        self.assertTrue(ctype.startswith("multipart/form-data; boundary="))
+        self.assertIn(b'name="projectTitle"\r\n\r\nT', body)
+        self.assertIn(b'name="pdfFile"; filename="doc.pdf"', body)
+        self.assertIn(b"Content-Type: application/pdf", body)
+        self.assertTrue(body.endswith(("--" + boundary + "--\r\n").encode()))
 
 
 if __name__ == "__main__":
