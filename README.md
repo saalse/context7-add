@@ -1,5 +1,12 @@
 # context7-add
 
+[![CI](https://github.com/saalse/context7-add/actions/workflows/ci.yml/badge.svg)](https://github.com/saalse/context7-add/actions/workflows/ci.yml)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)](skills/context7-add/scripts/c7.py)
+[![License: MIT](https://img.shields.io/github/license/saalse/context7-add)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/saalse/context7-add)](https://github.com/saalse/context7-add/commits/main)
+[![Agent Skills](https://img.shields.io/badge/Agent%20Skills-spec-8A2BE2)](https://agentskills.io/specification)
+[![Context7](https://img.shields.io/badge/Context7-indexed-00A86B)](https://context7.com/saalse/context7-add)
+
 An agent skill that makes documentation available through [Context7](https://context7.com)
 when it isn't yet: it **indexes** a repo, docs site, `llms.txt`, OpenAPI spec or PDF/DOCX file
 if Context7 doesn't have it, and **allows** it in your teamspace policy so your API key and the
@@ -75,6 +82,17 @@ auth, not found, refused by policy, rate limited, unprocessable, timed out, subm
 queue full, file too large). See `python3 $C7 --help`.
 
 The skill follows the [Agent Skills specification](https://agentskills.io/specification).
+
+## Development
+
+The tests are offline: they stub the Context7 API, so they need no key or network.
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+CI runs them on Python 3.8 to 3.13, validates the skill against the Agent Skills
+specification, and prints a coverage report.
 
 ## Notes
 
